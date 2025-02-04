@@ -1,7 +1,6 @@
 import os
 import requests
 import pandas as pd
-import talib
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.responses import JSONResponse
 from binance.client import Client
@@ -23,15 +22,30 @@ def get_historical_data(symbol="BTCUSDT", interval="1h", limit=100):
     df["close"] = df["close"].astype(float)
     return df
 
-# Apply technical indicators
+# Apply technical indicators manually
 def calculate_indicators(df):
-    df["SMA_10"] = talib.SMA(df["close"], timeperiod=10)
-    df["SMA_50"] = talib.SMA(df["close"], timeperiod=50)
-    df["RSI"] = talib.RSI(df["close"], timeperiod=14)
-    macd, signal, _ = talib.MACD(df["close"], fastperiod=12, slowperiod=26, signalperiod=9)
-    df["MACD"] = macd
-    df["Signal"] = signal
+    df["SMA_10"] = df["close"].rolling(window=10).mean()
+    df["SMA_50"] = df["close"].rolling(window=50).mean()
+    df["RSI"] = compute_rsi(df["close"], 14)
+    df["MACD"], df["Signal"] = compute_macd(df["close"])
     return df
+
+# Compute RSI manually
+def compute_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+# Compute MACD manually
+def compute_macd(series, short_period=12, long_period=26, signal_period=9):
+    short_ema = series.ewm(span=short_period, adjust=False).mean()
+    long_ema = series.ewm(span=long_period, adjust=False).mean()
+    macd = short_ema - long_ema
+    signal = macd.ewm(span=signal_period, adjust=False).mean()
+    return macd, signal
 
 # Generate buy/sell signals
 def get_signals(df):
