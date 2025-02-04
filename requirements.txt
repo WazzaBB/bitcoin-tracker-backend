@@ -2,5 +2,4 @@ fastapi
 uvicorn
 requests
 pandas
-ta-lib
 python-binance
