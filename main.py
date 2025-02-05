@@ -32,7 +32,8 @@ def get_historical_data(symbol="BTCUSDT", interval="1h", limit=100):
     try:
         klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Binance API error: {e}")
+        logging.error(f"Binance API error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch historical data from Binance.")
     
     df = pd.DataFrame(klines, columns=[
         "timestamp", "open", "high", "low", "close", "volume", "close_time", 
@@ -92,23 +93,28 @@ def send_telegram_alert(message):
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-    requests.post(url, data=data)
+    response = requests.post(url, data=data)
+    if response.status_code == 200:
+        logging.info("Telegram alert sent successfully.")
+    else:
+        logging.error(f"Failed to send Telegram alert: {response.text}")
 
 # Bitcoin price tracking API
 @app.get("/bitcoin")
 def track_price(background_tasks: BackgroundTasks):
-    df = get_historical_data()
-    df = calculate_indicators(df)
-    signals = get_signals(df)
-    price = df.iloc[-1]["close"]
-    
-    if signals:
-        message = f"Bitcoin Price: ${price:.2f}\nSignals: {', '.join(signals)}"
-        background_tasks.add_task(send_telegram_alert, message)
-    
-    return JSONResponse(content={"price": price, "signals": signals})
+    try:
+        df = get_historical_data()
+        df = calculate_indicators(df)
+        signals = get_signals(df)
+        price = df.iloc[-1]["close"]
+        
+        if signals:
+            message = f"Bitcoin Price: ${price:.2f}\nSignals: {', '.join(signals)}"
+            background_tasks.add_task(send_telegram_alert, message)
+        
+        return JSONResponse(content={"price": price, "signals": signals})
+    except Exception as e:
+        logging.error(f"Error in track_price endpoint: {e}")
+        raise HTTPException(status_code=500, detail="An error occurred while processing the request.")
 
-# Run the server
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
