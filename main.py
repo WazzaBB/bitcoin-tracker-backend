@@ -1,9 +1,10 @@
 import os
 import requests
 import pandas as pd
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse
 from binance.client import Client
+import logging
 
 # Load environment variables
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
@@ -11,41 +12,60 @@ BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+# Ensure Binance credentials exist
+if not BINANCE_API_KEY or not BINANCE_SECRET_KEY:
+    raise ValueError("Missing Binance API credentials. Set BINANCE_API_KEY and BINANCE_SECRET_KEY.")
+
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 app = FastAPI()
 
+# Logger setup
+logging.basicConfig(level=logging.INFO)
+
+# Root endpoint (fixes 404 issue)
+@app.get("/")
+def home():
+    return {"message": "Bitcoin Tracker API is running!"}
+
 # Fetch historical data
 def get_historical_data(symbol="BTCUSDT", interval="1h", limit=100):
-    klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-    df = pd.DataFrame(klines, columns=["timestamp", "open", "high", "low", "close", "volume", "close_time", "qav", "num_trades", "taker_base", "taker_quote", "ignore"])
+    try:
+        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Binance API error: {e}")
+    
+    df = pd.DataFrame(klines, columns=[
+        "timestamp", "open", "high", "low", "close", "volume", "close_time", 
+        "qav", "num_trades", "taker_base", "taker_quote", "ignore"
+    ])
     df = df[["timestamp", "open", "high", "low", "close", "volume"]]
     df["close"] = df["close"].astype(float)
     return df
 
-# Apply technical indicators manually
-def calculate_indicators(df):
-    df["SMA_10"] = df["close"].rolling(window=10).mean()
-    df["SMA_50"] = df["close"].rolling(window=50).mean()
-    df["RSI"] = compute_rsi(df["close"], 14)
-    df["MACD"], df["Signal"] = compute_macd(df["close"])
-    return df
-
-# Compute RSI manually
+# Compute RSI
 def compute_rsi(series, period=14):
     delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
+    loss = -delta.where(delta < 0, 0).rolling(window=period).mean()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-# Compute MACD manually
+# Compute MACD
 def compute_macd(series, short_period=12, long_period=26, signal_period=9):
     short_ema = series.ewm(span=short_period, adjust=False).mean()
     long_ema = series.ewm(span=long_period, adjust=False).mean()
     macd = short_ema - long_ema
     signal = macd.ewm(span=signal_period, adjust=False).mean()
     return macd, signal
+
+# Apply indicators
+def calculate_indicators(df):
+    df["SMA_10"] = df["close"].rolling(window=10).mean()
+    df["SMA_50"] = df["close"].rolling(window=50).mean()
+    df["RSI"] = compute_rsi(df["close"], 14)
+    df["MACD"], df["Signal"] = compute_macd(df["close"])
+    return df
 
 # Generate buy/sell signals
 def get_signals(df):
@@ -67,12 +87,15 @@ def get_signals(df):
 
 # Send Telegram alert
 def send_telegram_alert(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logging.warning("Telegram credentials are missing. Cannot send alerts.")
+        return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
     requests.post(url, data=data)
 
-# API endpoint to fetch Bitcoin price and indicators
-@app.get("/track")
+# Bitcoin price tracking API
+@app.get("/bitcoin")
 def track_price(background_tasks: BackgroundTasks):
     df = get_historical_data()
     df = calculate_indicators(df)
