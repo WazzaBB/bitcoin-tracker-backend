@@ -1,6 +1,7 @@
 import os
 import requests
 import pandas as pd
+import numpy as np
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse
 from binance.client import Client
@@ -22,18 +23,16 @@ app = FastAPI()
 # Logger setup
 logging.basicConfig(level=logging.INFO)
 
-# Root endpoint (fixes 404 issue)
 @app.get("/")
 def home():
-    return {"message": "Bitcoin Tracker API is running!"}
+    return {"message": "Bitcoin Tracker API is running with aggressive strategy!"}
 
 # Fetch historical data
 def get_historical_data(symbol="BTCUSDT", interval="1h", limit=100):
     try:
         klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
     except Exception as e:
-        logging.error(f"Binance API error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch historical data from Binance.")
+        raise HTTPException(status_code=500, detail=f"Binance API error: {e}")
     
     df = pd.DataFrame(klines, columns=[
         "timestamp", "open", "high", "low", "close", "volume", "close_time", 
@@ -41,6 +40,7 @@ def get_historical_data(symbol="BTCUSDT", interval="1h", limit=100):
     ])
     df = df[["timestamp", "open", "high", "low", "close", "volume"]]
     df["close"] = df["close"].astype(float)
+    df["volume"] = df["volume"].astype(float)
     return df
 
 # Compute RSI
@@ -60,30 +60,64 @@ def compute_macd(series, short_period=12, long_period=26, signal_period=9):
     signal = macd.ewm(span=signal_period, adjust=False).mean()
     return macd, signal
 
+# Compute Bollinger Bands
+def compute_bollinger_bands(series, period=20, std_dev=2):
+    sma = series.rolling(window=period).mean()
+    std = series.rolling(window=period).std()
+    upper_band = sma + (std_dev * std)
+    lower_band = sma - (std_dev * std)
+    return upper_band, lower_band
+
+# Compute Stochastic RSI
+def compute_stoch_rsi(series, period=14):
+    min_val = series.rolling(window=period).min()
+    max_val = series.rolling(window=period).max()
+    stoch_rsi = 100 * ((series - min_val) / (max_val - min_val))
+    return stoch_rsi
+
+# Compute Exponential Moving Averages
+def compute_ema(series, period):
+    return series.ewm(span=period, adjust=False).mean()
+
 # Apply indicators
 def calculate_indicators(df):
     df["SMA_10"] = df["close"].rolling(window=10).mean()
     df["SMA_50"] = df["close"].rolling(window=50).mean()
     df["RSI"] = compute_rsi(df["close"], 14)
     df["MACD"], df["Signal"] = compute_macd(df["close"])
+    df["BB_Upper"], df["BB_Lower"] = compute_bollinger_bands(df["close"])
+    df["Stoch_RSI"] = compute_stoch_rsi(df["close"])
+    df["EMA_5"] = compute_ema(df["close"], 5)
+    df["EMA_20"] = compute_ema(df["close"], 20)
     return df
 
 # Generate buy/sell signals
 def get_signals(df):
     latest = df.iloc[-1]
     signals = []
+    
     if latest["SMA_10"] > latest["SMA_50"]:
         signals.append("BUY: SMA Crossover")
-    if latest["RSI"] < 30:
+    if latest["RSI"] < 40:
         signals.append("BUY: RSI Oversold")
     if latest["MACD"] > latest["Signal"]:
         signals.append("BUY: MACD Trend")
+    if latest["close"] < latest["BB_Lower"]:
+        signals.append("BUY: Bollinger Band")
+    if latest["EMA_5"] > latest["EMA_20"]:
+        signals.append("BUY: EMA Crossover")
+    
     if latest["SMA_10"] < latest["SMA_50"]:
         signals.append("SELL: SMA Crossover")
-    if latest["RSI"] > 70:
+    if latest["RSI"] > 60:
         signals.append("SELL: RSI Overbought")
     if latest["MACD"] < latest["Signal"]:
         signals.append("SELL: MACD Trend")
+    if latest["close"] > latest["BB_Upper"]:
+        signals.append("SELL: Bollinger Band")
+    if latest["EMA_5"] < latest["EMA_20"]:
+        signals.append("SELL: EMA Crossover")
+    
     return signals
 
 # Send Telegram alert
@@ -93,28 +127,18 @@ def send_telegram_alert(message):
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-    response = requests.post(url, data=data)
-    if response.status_code == 200:
-        logging.info("Telegram alert sent successfully.")
-    else:
-        logging.error(f"Failed to send Telegram alert: {response.text}")
+    requests.post(url, data=data)
 
 # Bitcoin price tracking API
 @app.get("/bitcoin")
 def track_price(background_tasks: BackgroundTasks):
-    try:
-        df = get_historical_data()
-        df = calculate_indicators(df)
-        signals = get_signals(df)
-        price = df.iloc[-1]["close"]
-        
-        if signals:
-            message = f"Bitcoin Price: ${price:.2f}\nSignals: {', '.join(signals)}"
-            background_tasks.add_task(send_telegram_alert, message)
-        
-        return JSONResponse(content={"price": price, "signals": signals})
-    except Exception as e:
-        logging.error(f"Error in track_price endpoint: {e}")
-        raise HTTPException(status_code=500, detail="An error occurred while processing the request.")
-
-
+    df = get_historical_data()
+    df = calculate_indicators(df)
+    signals = get_signals(df)
+    price = df.iloc[-1]["close"]
+    
+    if signals:
+        message = f"Bitcoin Price: ${price:.2f}\nSignals: {', '.join(signals)}"
+        background_tasks.add_task(send_telegram_alert, message)
+    
+    return JSONResponse(content={"price": price, "signals": signals})
