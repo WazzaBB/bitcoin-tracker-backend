@@ -22,7 +22,7 @@ app = FastAPI()
 # Logger setup
 logging.basicConfig(level=logging.INFO)
 
-# Root endpoint
+# Root endpoint (fixes 404 issue)
 @app.get("/")
 def home():
     return {"message": "Bitcoin Tracker API is running!"}
@@ -40,9 +40,6 @@ def get_historical_data(symbol="BTCUSDT", interval="1h", limit=100):
     ])
     df = df[["timestamp", "open", "high", "low", "close", "volume"]]
     df["close"] = df["close"].astype(float)
-    df["high"] = df["high"].astype(float)
-    df["low"] = df["low"].astype(float)
-    df["volume"] = df["volume"].astype(float)
     return df
 
 # Compute RSI
@@ -63,23 +60,23 @@ def compute_macd(series, short_period=12, long_period=26, signal_period=9):
     return macd, signal
 
 # Compute Bollinger Bands
-def compute_bollinger_bands(series, period=20):
+def compute_bollinger_bands(series, period=20, std_dev=2):
     sma = series.rolling(window=period).mean()
     std = series.rolling(window=period).std()
-    upper_band = sma + (2 * std)
-    lower_band = sma - (2 * std)
+    upper_band = sma + (std_dev * std)
+    lower_band = sma - (std_dev * std)
     return upper_band, lower_band
 
+# Compute Momentum
+def compute_momentum(series, period=10):
+    return series.diff(period)
+
 # Compute Stochastic RSI
-def compute_stochastic_rsi(series, period=14):
+def compute_stoch_rsi(series, period=14):
     min_val = series.rolling(window=period).min()
     max_val = series.rolling(window=period).max()
     stoch_rsi = 100 * (series - min_val) / (max_val - min_val)
     return stoch_rsi
-
-# Compute Momentum Indicator
-def compute_momentum(series, period=10):
-    return series.diff(periods=period)
 
 # Apply indicators
 def calculate_indicators(df):
@@ -90,15 +87,19 @@ def calculate_indicators(df):
     df["RSI"] = compute_rsi(df["close"], 14)
     df["MACD"], df["Signal"] = compute_macd(df["close"])
     df["Upper_Band"], df["Lower_Band"] = compute_bollinger_bands(df["close"])
-    df["Stoch_RSI"] = compute_stochastic_rsi(df["close"])
     df["Momentum"] = compute_momentum(df["close"])
+    df["Stoch_RSI"] = compute_stoch_rsi(df["RSI"])
     return df
 
-# Generate buy/sell signals
+# Generate buy/sell signals with debugging
 def get_signals(df):
     latest = df.iloc[-1]
-    signals = []
     
+    # Debugging: Print latest row to check indicator values
+    print("Latest Data Row:\n", latest)  # Prints values to Render logs
+
+    signals = []
+
     # Trend-based signals
     if latest["SMA_10"] > latest["SMA_50"]:
         signals.append("BUY: SMA Crossover")
@@ -137,6 +138,7 @@ def send_telegram_alert(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
     response = requests.post(url, data=data)
+    
     if response.status_code != 200:
         logging.error(f"Failed to send Telegram alert: {response.text}")
 
