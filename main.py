@@ -1,7 +1,6 @@
 import os
 import requests
 import pandas as pd
-import numpy as np
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse
 from binance.client import Client
@@ -23,9 +22,10 @@ app = FastAPI()
 # Logger setup
 logging.basicConfig(level=logging.INFO)
 
+# Root endpoint
 @app.get("/")
 def home():
-    return {"message": "Bitcoin Tracker API is running with aggressive strategy!"}
+    return {"message": "Bitcoin Tracker API is running!"}
 
 # Fetch historical data
 def get_historical_data(symbol="BTCUSDT", interval="1h", limit=100):
@@ -40,6 +40,8 @@ def get_historical_data(symbol="BTCUSDT", interval="1h", limit=100):
     ])
     df = df[["timestamp", "open", "high", "low", "close", "volume"]]
     df["close"] = df["close"].astype(float)
+    df["high"] = df["high"].astype(float)
+    df["low"] = df["low"].astype(float)
     df["volume"] = df["volume"].astype(float)
     return df
 
@@ -61,34 +63,35 @@ def compute_macd(series, short_period=12, long_period=26, signal_period=9):
     return macd, signal
 
 # Compute Bollinger Bands
-def compute_bollinger_bands(series, period=20, std_dev=2):
+def compute_bollinger_bands(series, period=20):
     sma = series.rolling(window=period).mean()
     std = series.rolling(window=period).std()
-    upper_band = sma + (std_dev * std)
-    lower_band = sma - (std_dev * std)
+    upper_band = sma + (2 * std)
+    lower_band = sma - (2 * std)
     return upper_band, lower_band
 
 # Compute Stochastic RSI
-def compute_stoch_rsi(series, period=14):
+def compute_stochastic_rsi(series, period=14):
     min_val = series.rolling(window=period).min()
     max_val = series.rolling(window=period).max()
-    stoch_rsi = 100 * ((series - min_val) / (max_val - min_val))
+    stoch_rsi = 100 * (series - min_val) / (max_val - min_val)
     return stoch_rsi
 
-# Compute Exponential Moving Averages
-def compute_ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
+# Compute Momentum Indicator
+def compute_momentum(series, period=10):
+    return series.diff(periods=period)
 
 # Apply indicators
 def calculate_indicators(df):
     df["SMA_10"] = df["close"].rolling(window=10).mean()
     df["SMA_50"] = df["close"].rolling(window=50).mean()
+    df["EMA_10"] = df["close"].ewm(span=10, adjust=False).mean()
+    df["EMA_50"] = df["close"].ewm(span=50, adjust=False).mean()
     df["RSI"] = compute_rsi(df["close"], 14)
     df["MACD"], df["Signal"] = compute_macd(df["close"])
-    df["BB_Upper"], df["BB_Lower"] = compute_bollinger_bands(df["close"])
-    df["Stoch_RSI"] = compute_stoch_rsi(df["close"])
-    df["EMA_5"] = compute_ema(df["close"], 5)
-    df["EMA_20"] = compute_ema(df["close"], 20)
+    df["Upper_Band"], df["Lower_Band"] = compute_bollinger_bands(df["close"])
+    df["Stoch_RSI"] = compute_stochastic_rsi(df["close"])
+    df["Momentum"] = compute_momentum(df["close"])
     return df
 
 # Generate buy/sell signals
@@ -96,28 +99,34 @@ def get_signals(df):
     latest = df.iloc[-1]
     signals = []
     
+    # Trend-based signals
     if latest["SMA_10"] > latest["SMA_50"]:
         signals.append("BUY: SMA Crossover")
-    if latest["RSI"] < 40:
+    if latest["EMA_10"] > latest["EMA_50"]:
+        signals.append("BUY: EMA Crossover")
+    if latest["RSI"] < 30:
         signals.append("BUY: RSI Oversold")
     if latest["MACD"] > latest["Signal"]:
         signals.append("BUY: MACD Trend")
-    if latest["close"] < latest["BB_Lower"]:
-        signals.append("BUY: Bollinger Band")
-    if latest["EMA_5"] > latest["EMA_20"]:
-        signals.append("BUY: EMA Crossover")
+
+    # Overbought/Oversold signals
+    if latest["close"] > latest["Upper_Band"]:
+        signals.append("SELL: Bollinger Band Breakout (Overbought)")
+    if latest["close"] < latest["Lower_Band"]:
+        signals.append("BUY: Bollinger Band Breakout (Oversold)")
+
+    # Momentum signals
+    if latest["Momentum"] > 0:
+        signals.append("BUY: Positive Momentum")
+    if latest["Momentum"] < 0:
+        signals.append("SELL: Negative Momentum")
     
-    if latest["SMA_10"] < latest["SMA_50"]:
-        signals.append("SELL: SMA Crossover")
-    if latest["RSI"] > 60:
-        signals.append("SELL: RSI Overbought")
-    if latest["MACD"] < latest["Signal"]:
-        signals.append("SELL: MACD Trend")
-    if latest["close"] > latest["BB_Upper"]:
-        signals.append("SELL: Bollinger Band")
-    if latest["EMA_5"] < latest["EMA_20"]:
-        signals.append("SELL: EMA Crossover")
-    
+    # Stochastic RSI signals
+    if latest["Stoch_RSI"] > 80:
+        signals.append("SELL: Stochastic RSI Overbought")
+    if latest["Stoch_RSI"] < 20:
+        signals.append("BUY: Stochastic RSI Oversold")
+
     return signals
 
 # Send Telegram alert
@@ -127,7 +136,9 @@ def send_telegram_alert(message):
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-    requests.post(url, data=data)
+    response = requests.post(url, data=data)
+    if response.status_code != 200:
+        logging.error(f"Failed to send Telegram alert: {response.text}")
 
 # Bitcoin price tracking API
 @app.get("/bitcoin")
@@ -142,3 +153,8 @@ def track_price(background_tasks: BackgroundTasks):
         background_tasks.add_task(send_telegram_alert, message)
     
     return JSONResponse(content={"price": price, "signals": signals})
+
+# Run the server
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
